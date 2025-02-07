@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>360 Street View</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.7.1/dist/leaflet.css" />
+  <script src="marzipano.js"></script>
+  <script src="https://unpkg.com/leaflet@1.7.1/dist/leaflet.js"></script>
+	<style>
+	  body, html {
+		margin: 0;
+		height: 100%;
+		overflow: hidden;
+		background-color: black;
+	  }
+	  #pano {
+		width: 100%;
+		height: 100%;
+	  }
+
+	  /* Gaya untuk hotspot */
+	  .hotspot {
+	    margin-left: -55px;
+		margin-top:-50px;
+	    width: 100px;
+		height: 110px;
+		position: absolute;
+		cursor: pointer;
+		z-index: 10;
+		opacity: 0.5;
+		background-image: url("arrow.png");
+	  }
+
+	  /* Efek hover untuk hotspot */
+	  .hotspot:hover {
+
+	  }
+	  .infoDisplay {
+		position: absolute;
+		top: 10px;
+		left: 10px;
+		background: rgba(0, 0, 0, 0.5);
+		color: white;
+		padding: 10px;
+		border-radius: 5px;
+		font-family: Arial, sans-serif;
+		z-index: 1000;
+	  }
+	</style>
+</head>
+<body>
+  <div id="pano"></div>
+  <div id="map" style="position: absolute; bottom: 20px; left: 20px; width: 300px; height: 200px; z-index: 1000; border: 2px solid white; border-radius: 10px;"></div>
+  <div class="infoDisplay">
+   <div id="yawDisplay">Yaw: 0.00</div>
+   <div id="pitchDisplay">Pitch: 0.00</div>
+   <div id="fileDisplay">File:</div>
+   <div id="dateDisplay">Date:</div>
+   </div>
+
+  <script>
+	console.log("Script loaded")
+    const panoElement = document.getElementById('pano');
+    const viewer = new Marzipano.Viewer(panoElement);
+    let currentScene = null;
+	let currentYaw = 0;
+	let currentPitch = 0;
+	let startLat = 0;
+	let startLong = 0;
+	let alphaOffset = 0; // Zero point offset untuk yaw
+	let betaOffset = 0;  // Zero point offset untuk pitch
+	let gammaOffset = 0; // Zero point offset untuk roll
+	let isCalibrated = false;
+	let map;
+
+    // Fungsi untuk memuat data scene dari API
+    async function fetchSceneData(sceneId, pitch, yaw) {
+        try {
+            const response = await fetch(`/get_scene?id=${sceneId}&yaw=${yaw}&pitch=${pitch}`);
+            if (!response.ok) {
+                throw new Error(`Failed to fetch scene data: ${response.statusText}`);
+            }
+            return await response.json();
+        } catch (error) {
+            console.error("Error fetching scene data:", error);
+            return null;
+        }
+    }
+
+    // Fungsi untuk memuat scene dengan teknik `destroyScene` tertunda
+    async function loadScene(sceneId, pitch, yaw) {
+        const sceneData = await fetchSceneData(sceneId, pitch, yaw);
+        console.log("sceneData: ",sceneData)
+        if (!sceneData) {
+            console.error(`Scene with ID ${sceneId} could not be loaded.`);
+            return;
+        }
+
+        const initialView = sceneData.initialView || { yaw: 0, pitch: 0, fov: Math.PI / 2 };
+
+        // Buat sumber gambar panorama
+        const source = Marzipano.ImageUrlSource.fromString(sceneData.image);
+        const geometry = new Marzipano.EquirectGeometry([{ width: 4096 }]);
+        const limiter = Marzipano.RectilinearView.limit.traditional(4096, 150 * Math.PI / 180);
+        const view = new Marzipano.RectilinearView(initialView, limiter);
+
+		fileDisplay.textContent = `File: ${sceneData.title}`;
+		dateDisplay.textContent = `Date: ${sceneData.date}`;
+		startLat = sceneData.latitude;
+		startLong = sceneData.longitude;
+
+		if (map === undefined || map === null) {
+			console.log("Map belum dimuat. Membuat peta baru...");
+		} else {
+			console.log("Map sudah dimuat. Destroying existing map...");
+			map.remove(); // Hapus peta yang sudah ada
+		}
+
+		// Inisialisasi peta Leaflet
+		map = L.map('map').setView([startLat, startLong], 20); // Default koordinat (Jakarta)
+
+		// Tambahkan layer peta (tiles)
+		L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+			maxZoom: 19,
+			attribution: '&copy; OpenStreetMap contributors'
+		}).addTo(map);
+		
+		addMapMarker(startLat, startLong, sceneId, "red");
+
+        // Buat scene baru
+        const newScene = viewer.createScene({
+            source: source,
+            geometry: geometry,
+            view: view,
+        });
+
+        // Tambahkan hotspot ke scene
+        sceneData.hotspots.forEach(hotspot => {
+
+            const hotspotElement = document.createElement('div');
+            hotspotElement.className = 'hotspot';
+
+            // Tambahkan event klik untuk memuat scene target
+            hotspotElement.addEventListener('click', () => {
+                loadScene(hotspot.target, hotspot.pitch, hotspot.yaw); // Panggil API untuk scene berikutnya
+            });
+			//const getyaw = calculateYaw(sceneData.latitude, sceneData.longitude, hotspot.latitude, hotspot.longitude);
+            newScene.hotspotContainer().createHotspot(hotspotElement, { yaw: hotspot.yaw, pitch: hotspot.pitch });
+			addMapMarker(hotspot.latitude, hotspot.longitude, hotspot.target);
+            console.log("Hotspot added:", hotspot);
+        });
+
+        // Tampilkan scene baru
+        newScene.switchTo(() => {
+            // Hapus scene lama setelah scene baru dimuat
+            if (currentScene) {
+                viewer.destroyScene(currentScene);
+            }
+            currentScene = newScene; // Perbarui scene aktif
+        });
+
+		view.addEventListener('change', () => {
+			const yaw = view.yaw(); // Get the current yaw
+			const pitch = view.pitch(); // Get the current yaw
+			yawDisplay.textContent = `Yaw: ${yaw.toFixed(2)}`; // Update the display
+			pitchDisplay.textContent = `Pitch: ${pitch.toFixed(2)}`; // Update the display
+			currentYaw = yaw.toFixed(2);
+			currentPitch = pitch.toFixed(2);
+		});
+
+		function addMapMarker(latitude, longitude, target, type = "blue", name = "Hotspot") {
+
+			const redIcon = L.icon({
+				iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-red.png', // URL gambar merah
+				shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/0.7.7/images/marker-shadow.png',
+				iconSize: [25, 41], // Ukuran icon
+				iconAnchor: [12, 41], // Posisi anchor
+				popupAnchor: [1, -34],
+				shadowSize: [41, 41]
+			});
+
+			const blueIcon = L.icon({
+				iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-blue.png', // URL gambar biru
+				shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+				iconSize: [25, 41],
+				iconAnchor: [12, 41],
+				popupAnchor: [1, -34],
+				shadowSize: [41, 41]
+			});
+			
+			if (type == "red" ) {
+				const marker = L.marker([latitude, longitude], { icon: redIcon }).addTo(map).on('click', () => {
+				});;
+			} else {
+				const marker = L.marker([latitude, longitude], { icon: blueIcon }).addTo(map).on('click', () => {
+					loadScene(target, initialPitch, initialYaw);
+				});;
+			}
+
+		}
+
+		function calculateYaw(lat1, lon1, lat2, lon2) {
+			// Konversi derajat ke radian
+			const toRadians = (deg) => deg * (Math.PI / 180);
+
+			// Konversi koordinat ke radian
+			const φ1 = toRadians(lat1);
+			const φ2 = toRadians(lat2);
+			const Δλ = toRadians(lon2 - lon1);
+
+			// Hitung komponen x dan y
+			const x = Math.sin(Δλ) * Math.cos(φ2);
+			const y = Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+
+			// Hitung yaw (radian)
+			let yaw = Math.atan2(x, y);
+
+			// Pastikan yaw berada di rentang -π hingga π
+			if (yaw > Math.PI) {
+			yaw -= 2 * Math.PI;
+			} else if (yaw < -Math.PI) {
+			yaw += 2 * Math.PI;
+			}
+
+			return yaw; // Yaw dalam radian
+		}
+
+		function isMobileDevice() {
+			return /Mobi|Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+		}
+
+
+		function isAndroidTablet() {
+			const userAgent = navigator.userAgent || navigator.vendor || window.opera;
+
+			// Deteksi Android dan pastikan bukan ponsel (mobile)
+			return /Android/i.test(userAgent) && !/Mobile/i.test(userAgent);
+		}
+
+		// Perbarui posisi yaw dan pitch saat ponsel digerakkan
+		if (!isAndroidTablet() && isMobileDevice() && window.DeviceOrientationEvent) {
+		
+			// Fungsi untuk menetapkan zero point
+			function setZeroPoint(event) {
+				if (!isCalibrated) {
+					alphaOffset = event.alpha || 0; // Offset untuk yaw
+					betaOffset = event.beta || 0;   // Offset untuk pitch
+					gammaOffset = event.gamma || 0; // Offset untuk roll
+					isCalibrated = true;            // Pastikan kalibrasi hanya dilakukan sekali
+					console.log("Zero point set: Alpha Offset =", alphaOffset, "Beta Offset =", betaOffset, "Gamma Offset =", gammaOffset);
+				}
+			}
+
+			// Fungsi untuk menghitung yaw dan pitch
+			function calculateOrientation(alpha, beta, gamma) {
+				// Gabungkan alpha (yaw) dan gamma (roll) untuk orientasi horizontal
+				let yaw = (alpha - alphaOffset + 360) % 360; // Normalisasi alpha ke 0-360 derajat
+				yaw += gamma - gammaOffset; // Tambahkan kontribusi gamma (roll)
+
+				// Normalisasi yaw ke 0-360 derajat
+				yaw = (yaw + 360) % 360;
+
+				// Hitung pitch (vertikal) dengan pembalikan arah
+				const pitch = (betaOffset - beta); // Membalik arah pitch
+
+				return { yaw, pitch };
+			}
+
+			// Event listener untuk orientasi perangkat
+			window.addEventListener('deviceorientation', (event) => {
+				if (!isCalibrated) {
+					setZeroPoint(event); // Tetapkan zero point saat halaman dimuat
+					return;
+				}
+
+				const rawAlpha = event.alpha || 0; // Yaw (kompas)
+				const rawBeta = event.beta || 0;  // Pitch (kemiringan vertikal)
+				const rawGamma = event.gamma || 0; // Roll (kemiringan horizontal)
+
+				// Hitung orientasi yang benar
+				const { yaw, pitch } = calculateOrientation(rawAlpha, rawBeta, rawGamma);
+
+				// Konversi ke radian untuk Marzipano
+				const yawRad = ((yaw * Math.PI) / 180) * -1; // Balik arah yaw agar sesuai dengan mata
+				const pitchRad = ((pitch * Math.PI) / 180);
+
+				// Perbarui orientasi panorama
+				view.setYaw(yawRad);
+				view.setPitch(pitchRad);
+
+				// Perbarui tampilan
+				yawDisplay.textContent = `Yaw: ${yawRad.toFixed(2)}`;
+				pitchDisplay.textContent = `Pitch: ${pitchRad.toFixed(2)}`;
+				currentYaw = yawRad.toFixed(2);
+				currentPitch = pitchRad.toFixed(2);
+			});
+		} else {
+			console.error("DeviceOrientationEvent is not supported on this device.");
+		}
+
+
+    }
+
+    // URL API
+    // const apiUrl = "http://localhost:3000/get_scene";
+	// console.log("apiurl ",apiUrl)
+    // Muat scene awal
+
+	const initialSceneId = 1;  // ID panorama awal
+	const initialYaw = 0;  // Yaw awal
+	const initialPitch = 0;  // Pitch awal
+    loadScene(initialSceneId, initialPitch, initialYaw);
+	
+  </script>
+
+</body>
+</html>
